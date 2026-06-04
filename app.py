@@ -30,57 +30,172 @@ obs_q = qp.get("obs", [""])[0] or qp.get("resourceUrl", [""])[0]
 # 1️⃣ 讀 FHIR Observation
 # =========================================
 def load_patient_data_from_fhir(token, obs_url):
-    patient_data = {}
+    """
+    支援兩種 FHIR 回傳格式：
+    1. 單一 Observation resource
+    2. Bundle resource，內含多筆 Observation
+
+    若為 Bundle，會自動挑選 component 中包含最多流感預測欄位的 Observation。
+    """
+
+    TARGET_COMPONENT_TEXTS = {
+        "Temperature (°C)",
+        "Height (CM)",
+        "Weight (KG)",
+        "Pulse",
+        "Respiratory rate",
+        "Systolic BP",
+        "Oxygen saturation (%)",
+        "Season (1–4)",
+        "Week of Year",
+        "Days of illness",
+        "Influenza vaccine this year?",
+        "Exposure to confirmed influenza?",
+        "Recent travel?",
+        "New or increased cough?",
+        "Cough with sputum?",
+        "Sore throat?",
+        "Rhinorrhea / nasal congestion?",
+        "Sinus pain?",
+        "Influenza antivirals in past 30 days?",
+        "Chronic lung disease?",
+    }
+
+    def extract_observation_candidates(fhir_json):
+        """
+        回傳 Observation list。
+        如果是單一 Observation，就回傳 [Observation]。
+        如果是 Bundle，就從 entry 裡抓所有 Observation。
+        """
+        if not isinstance(fhir_json, dict):
+            return []
+
+        resource_type = fhir_json.get("resourceType")
+
+        if resource_type == "Observation":
+            return [fhir_json]
+
+        if resource_type == "Bundle":
+            observations = []
+            for entry in fhir_json.get("entry", []):
+                resource = entry.get("resource", {})
+                if resource.get("resourceType") == "Observation":
+                    observations.append(resource)
+            return observations
+
+        return []
+
+    def score_observation(obs):
+        """
+        根據 Observation.component 裡面有多少目標欄位來打分數。
+        分數越高，越可能是你的 Flu prediction Observation。
+        """
+        score = 0
+        for c in obs.get("component", []):
+            text = c.get("code", {}).get("text", "").strip()
+            if text in TARGET_COMPONENT_TEXTS:
+                score += 1
+        return score
+
+    def select_target_observation(observations):
+        """
+        從多筆 Observation 中選出最符合 Flu prediction 的那一筆。
+        """
+        if not observations:
+            return None
+
+        scored = [(score_observation(obs), obs) for obs in observations]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        best_score, best_obs = scored[0]
+
+        # 若完全沒有命中任何目標欄位，代表 Bundle 裡可能沒有我們要的 Observation
+        if best_score == 0:
+            return None
+
+        return best_obs
+
+    def parse_flu_observation(o):
+        """
+        解析單一 Flu prediction Observation 的 component。
+        """
+        patient_data = {}
+
+        for c in o.get("component", []):
+            text = c.get("code", {}).get("text", "").strip()
+
+            # Numeric
+            if text == "Temperature (°C)":
+                patient_data["temp"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Height (CM)":
+                patient_data["height"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Weight (KG)":
+                patient_data["weight"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Pulse":
+                patient_data["pulse"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Respiratory rate":
+                patient_data["rr"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Systolic BP":
+                patient_data["sbp"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Oxygen saturation (%)":
+                patient_data["o2s"] = c.get("valueQuantity", {}).get("value")
+            elif text == "Season (1–4)":
+                patient_data["season"] = c.get("valueInteger")
+            elif text == "Week of Year":
+                patient_data["WOS"] = c.get("valueInteger")
+            elif text == "Days of illness":
+                patient_data["DOI"] = c.get("valueInteger")
+
+            # Binary
+            elif text == "Influenza vaccine this year?":
+                patient_data["fluvaccine"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Exposure to confirmed influenza?":
+                patient_data["exposehuman"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Recent travel?":
+                patient_data["travel"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "New or increased cough?":
+                patient_data["cough"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Cough with sputum?":
+                patient_data["coughsputum"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Sore throat?":
+                patient_data["sorethroat"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Rhinorrhea / nasal congestion?":
+                patient_data["rhinorrhea"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Sinus pain?":
+                patient_data["sinuspain"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Influenza antivirals in past 30 days?":
+                patient_data["medhistav"] = "Yes" if c.get("valueInteger") == 1 else "No"
+            elif text == "Chronic lung disease?":
+                patient_data["pastmedchronlundis"] = "Yes" if c.get("valueInteger") == 1 else "No"
+
+        return patient_data
+
     try:
-        r = requests.get(obs_url, headers={"Authorization": f"Bearer {token}"}, verify=False, timeout=10)
-        o = r.json()
-    except Exception:
+        r = requests.get(
+            obs_url,
+            headers={"Authorization": f"Bearer {token}"},
+            verify=False,
+            timeout=10
+        )
+        r.raise_for_status()
+        fhir_json = r.json()
+
+    except Exception as e:
+        st.warning(f"FHIR request failed: {e}")
         return None
 
-    for c in o.get("component", []):
-        text = c.get("code", {}).get("text", "").strip()
-        # Numeric
-        if text == "Temperature (°C)":
-            patient_data["temp"] = c["valueQuantity"]["value"]
-        elif text == "Height (CM)":
-            patient_data["height"] = c["valueQuantity"]["value"]
-        elif text == "Weight (KG)":
-            patient_data["weight"] = c["valueQuantity"]["value"]
-        elif text == "Pulse":
-            patient_data["pulse"] = c["valueQuantity"]["value"]
-        elif text == "Respiratory rate":
-            patient_data["rr"] = c["valueQuantity"]["value"]
-        elif text == "Systolic BP":
-            patient_data["sbp"] = c["valueQuantity"]["value"]
-        elif text == "Oxygen saturation (%)":
-            patient_data["o2s"] = c["valueQuantity"]["value"]
-        elif text == "Season (1–4)":
-            patient_data["season"] = c.get("valueInteger")
-        elif text == "Week of Year":
-            patient_data["WOS"] = c.get("valueInteger")
-        elif text == "Days of illness":
-            patient_data["DOI"] = c.get("valueInteger")
-        # Binary
-        elif text == "Influenza vaccine this year?":
-            patient_data["fluvaccine"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Exposure to confirmed influenza?":
-            patient_data["exposehuman"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Recent travel?":
-            patient_data["travel"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "New or increased cough?":
-            patient_data["cough"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Cough with sputum?":
-            patient_data["coughsputum"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Sore throat?":
-            patient_data["sorethroat"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Rhinorrhea / nasal congestion?":
-            patient_data["rhinorrhea"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Sinus pain?":
-            patient_data["sinuspain"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Influenza antivirals in past 30 days?":
-            patient_data["medhistav"] = "Yes" if c.get("valueInteger") == 1 else "No"
-        elif text == "Chronic lung disease?":
-            patient_data["pastmedchronlundis"] = "Yes" if c.get("valueInteger") == 1 else "No"
+    observations = extract_observation_candidates(fhir_json)
+    target_observation = select_target_observation(observations)
+
+    if target_observation is None:
+        st.warning("No target Flu prediction Observation found in FHIR response.")
+        return {}
+
+    patient_data = parse_flu_observation(target_observation)
+
+    if not patient_data:
+        st.warning("Target Observation was found, but no matching components were parsed.")
+
     return patient_data
 
 # =========================================
