@@ -254,8 +254,8 @@ with left_col:
 
     st.subheader("Vitals & Timing")        
     temp = num_input("Temperature (°C)", 30.0, 42.0, 37.3, 1.0, "temp")
-    height = num_input("HEIGHT (CM)", 1.0, 400.0, 160.0, 0.5, "height")
-    weight = num_input("WEIGHT (KG)", 1.0, 400.0, 60.0, 0.5, "weight")
+    height = num_input("HEIGHT (CM)", 1.0, 400.0, 89.0, 0.5, "height")
+    weight = num_input("WEIGHT (KG)", 1.0, 400.0, 64.0, 0.5, "weight")
     DOI = num_input("Days of illness", 1, 14, 1, 1, "DOI")
     WOS = num_input("Week of year", 1, 53, 1, 1, "WOS")
     season = num_input("Season (1–4)", 1, 4, 1, 1, "season")
