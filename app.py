@@ -25,7 +25,7 @@ qp = st.experimental_get_query_params()
 
 # 抽出參數
 token_q = qp.get("token", [""])[0]
-obs_q   = qp.get("obs", [""])[0]
+obs_q = qp.get("obs", [""])[0] or qp.get("resourceUrl", [""])[0]
 # =========================================
 # 1️⃣ 讀 FHIR Observation
 # =========================================
